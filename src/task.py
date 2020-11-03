@@ -1,5 +1,4 @@
 import argparse
-import csv
 import os
 import shutil
 import subprocess
@@ -17,6 +16,7 @@ import config
 
 os.environ["OGR_INTERLEAVED_READING"] = "YES"
 os.environ["OSM_CONFIG_FILE"] = "/app/osm.ini"
+os.environ["OSM_MAX_TMPFILE_SIZE"] = "1024"
 
 
 class ConversionException(Exception):
@@ -30,9 +30,8 @@ class HIIOSMIngest(HIITask):
 
     1. Fetch OSM pbf file
     2. Convert PBF file -> CSV files (for each layer) using OGR
-    3. Filter and Combine CSV files
-    4. Upload filtered CSV file to Google Cloud Storage
-    5. Using earthengine CLI load CSV as table (temporary) in EE
+    3. Upload filtered CSV file to Google Cloud Storage
+    4. Using earthengine CLI load CSV as table (temporary) in EE
 
     """
 
@@ -79,32 +78,10 @@ class HIIOSMIngest(HIITask):
 
         return targ_path
 
-    def osm_to_csv(self, osm_file_path: str) -> str:
-        tags = config.tags
-        where_args = [f"{k}='{v}'" for k, v in tags]
-        options = gdal.VectorTranslateOptions(
-            format="CSV",
-            where=" or ".join(where_args),
-            layerCreationOptions=["GEOMETRY=AS_WKT"],
-        )
-        csv_path = self._unique_file_name(ext="csv")
-        gdal.VectorTranslate(csv_path, osm_file_path, options=options)
-
-        return csv_path
-
     def _remove_from_cloudstorage(self, path: str):
         client = Client()
         bucket = client.bucket(os.environ["HII_OSM_BUCKET"])
         bucket.delete_blob(path)
-
-    def import_csv_to_ee_table(self, local_path: str) -> str:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
-        blob_path = self._upload_to_cloudstorage(local_path)
-        uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{blob_path}"
-        try:
-            return self._cp_storage_to_ee(uri)
-        finally:
-            self._remove_from_cloudstorage(blob_path)
 
     def _cp_storage_to_ee(self, blob_uri: str) -> str:
         asset_id = f"projects/{self.ee_project}/_temp_osm_{self._args['taskdate']}"
@@ -124,73 +101,61 @@ class HIIOSMIngest(HIITask):
         except subprocess.CalledProcessError as err:
             raise ConversionException(err.stdout)
 
-    def _match_attribute_tag(self, row):
-        result = [
-            (attribute, tag) for attribute, tag in config.tags if row[attribute] == tag
-        ]
-        if result:
-            return result[0]
-        return None
-
-    def _write_to_file(self, src_csv_path, output_csv_file):
-        n = 0
-        with open(src_csv_path) as f:
-            reader = csv.DictReader(f, quoting=csv.QUOTE_ALL)
-            for row in reader:
-                result = self._match_attribute_tag(row)
-                if result is None:
-                    continue
-
-                output_csv_file.writerow([row["WKT"], result[0], result[1], "1"])
-                n += 1
-        return n
-
-    def combine_csv_files(self, csv_path: str):
-        output_path = self._unique_file_name(ext="csv")
-        _csv_path = Path(csv_path)
-        layers = [
-            _csv_path,
-            Path(_csv_path.parent, "points.csv"),
-            Path(_csv_path.parent, "lines.csv"),
-            Path(_csv_path.parent, "multilinestrings.csv"),
-            Path(_csv_path.parent, "multipolygons.csv"),
-            Path(_csv_path.parent, "other_relations.csv"),
+    def osm_to_csv(self, osm_file_path: str) -> str:
+        layer_names = [
+            "points",
+            "lines",
+            "multilinestrings",
+            "multipolygons",
+            "other_relations",
         ]
 
-        n = 0
-        with open(output_path, "w") as output:
-            w = csv.writer(output, quoting=csv.QUOTE_ALL)
-            w.writerow(["WKT", "attribute", "tag", "burn"])
+        where = []
+        attributes = []
+        for attribute, tags in config.tags.items():
+            attributes.append(attribute)
+            quoted_tags = ",".join([f"'{tag}'" for tag in tags])
+            where.append(f"{attribute} in ({quoted_tags})")
 
-            for layer in layers:
-                if layer.exists() is False:
-                    continue
+        sqls = []
+        where_clause = " OR ".join(where)
+        select_tag = f"COALESCE({','.join(attributes)})"
+        for layer_name in layer_names:
+            sqls.append(
+                f"SELECT GEOMETRY, {select_tag} AS tag, 1 AS burn \
+                FROM {layer_name} WHERE {where_clause}"
+            )
 
-                n += self._write_to_file(str(layer), w)
+        options = gdal.VectorTranslateOptions(
+            format="CSV",
+            SQLStatement=" UNION ALL ".join(sqls),
+            SQLDialect="SQLITE",
+            layerCreationOptions=["GEOMETRY=AS_WKT"],
+        )
+        csv_path = self._unique_file_name(ext="csv")
+        gdal.VectorTranslate(csv_path, osm_file_path, options=options)
 
-        if n == 0:
-            Path(output_path).unlink(missing_ok=True)
-            output_path = None
+        return csv_path
 
-        return output_path
+    def import_csv_to_ee_table(self, local_path: str) -> str:
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
+        blob_path = self._upload_to_cloudstorage(local_path)
+        uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{blob_path}"
+        try:
+            return self._cp_storage_to_ee(uri)
+        finally:
+            self._remove_from_cloudstorage(blob_path)
 
     def calc(self):
-        # - download full-world osm pbf
-        # - use ogr2ogr to convert just tags we need to csv
-        # - remove extraneous columns
-        # - combine multiple geometries (?)
-        # - ingest into ee
-
         if self.csv_file is None:
             if self.osm_file is None:
                 self.osm_file = self.download_osm()
 
             if self.csv_file is None:
-                csv_path = self.osm_to_csv(self.osm_file)
-                self.csv_file = self.combine_csv_files(csv_path)
+                self.csv_file = self.osm_to_csv(self.osm_file)
 
         if self.csv_file:
-            self.import_csv_to_ee_table(self.csv_file)
+            print(self.import_csv_to_ee_table(self.csv_file))
 
 
 if __name__ == "__main__":
@@ -216,7 +181,7 @@ if __name__ == "__main__":
         "-c",
         "--csv_file",
         type=str,
-        help="CSV file to upload to Earth Engine.  Format: WKT,attribute,tag,burn",
+        help="CSV file to upload to Earth Engine.  Format: WKT,tag,burn",
     )
 
     options = parser.parse_args()
