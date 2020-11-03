@@ -5,7 +5,7 @@ build:
 	docker build --no-cache -t $(IMAGE) .
 
 run:
-	docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint python $(IMAGE) task.py -f osm.pbf
+	docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint python $(IMAGE) task.py
 
 shell:
 	docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint sh $(IMAGE)

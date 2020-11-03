@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import gdal
+import gdal  # type: ignore
 import requests
-from google.cloud.storage import Client
-from task_base import HIITask
+from google.cloud.storage import Client  # type: ignore
+from task_base import HIITask  # type: ignore
 
 import config
 
