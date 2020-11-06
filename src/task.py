@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import ee  # type: ignore
 import gdal  # type: ignore
 import requests
 from google.cloud.storage import Client  # type: ignore
@@ -36,6 +37,7 @@ class HIIOSMIngest(HIITask):
     """
 
     ee_osm_root = "osm"
+    scale = 100
     google_creds_path = "/.google_creds"
 
     def __init__(self, *args, **kwargs):
@@ -47,6 +49,8 @@ class HIIOSMIngest(HIITask):
 
         self.osm_url = self._args.get("osm_url") or os.environ["OSM_DATA_SOURCE"]
         self.csv_file = self._args.get("csv_file")
+        self.ee_osm_table = self._args.get("ee_osm_table")
+        self.overwrite = self._args.get("overwrite")
 
         creds_path = Path(self.google_creds_path)
         if creds_path.exists() is False:
@@ -60,14 +64,9 @@ class HIIOSMIngest(HIITask):
 
         return name
 
-    def download_osm(self) -> str:
-        file_path = self._unique_file_name(ext="pbf")
-
-        with requests.get(self.osm_url, stream=True) as r:
-            with open(file_path, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
-
-        return file_path
+    def _get_asset_id(self, attribute, tag, task_date):
+        root = f"projects/{self.ee_project}/{self.ee_osm_root}"
+        return f"{root}/{attribute}/{tag}_{task_date}"
 
     def _upload_to_cloudstorage(self, src_path: str) -> str:
         targ_path = Path(src_path).name
@@ -84,7 +83,7 @@ class HIIOSMIngest(HIITask):
         bucket.delete_blob(path)
 
     def _cp_storage_to_ee(self, blob_uri: str) -> str:
-        asset_id = f"projects/{self.ee_project}/_temp_osm_{self._args['taskdate']}"
+        asset_id = f"projects/{self.ee_project}/_temp_osm_{self.taskdate}"
         try:
             cmd = [
                 "/usr/local/bin/earthengine",
@@ -100,6 +99,15 @@ class HIIOSMIngest(HIITask):
             return asset_id
         except subprocess.CalledProcessError as err:
             raise ConversionException(err.stdout)
+
+    def download_osm(self) -> str:
+        file_path = self._unique_file_name(ext="pbf")
+
+        with requests.get(self.osm_url, stream=True) as r:
+            with open(file_path, "wb") as f:
+                shutil.copyfileobj(r.raw, f)
+
+        return file_path
 
     def osm_to_csv(self, osm_file_path: str) -> str:
         layer_names = [
@@ -137,6 +145,12 @@ class HIIOSMIngest(HIITask):
 
         return csv_path
 
+    def asset_exists(self, asset_id: str) -> bool:
+        try:
+            return ee.data.getAsset(asset_id) is not None
+        except ee.ee_exception.EEException:
+            return False
+
     def import_csv_to_ee_table(self, local_path: str) -> str:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
         blob_path = self._upload_to_cloudstorage(local_path)
@@ -146,16 +160,43 @@ class HIIOSMIngest(HIITask):
         finally:
             self._remove_from_cloudstorage(blob_path)
 
-    def calc(self):
-        if self.csv_file is None:
-            if self.osm_file is None:
-                self.osm_file = self.download_osm()
+    def rasterize_table(self, table_asset_id: str, attribute: str, tag: str) -> str:
+        table = ee.FeatureCollection(table_asset_id)
 
+        image = table.filter(ee.Filter.eq("tag", tag)).reduceToImage(
+            properties=["burn"], reducer=ee.Reducer.first()
+        )
+        image = image.reproject(crs="EPSG:4326", scale=self.scale)
+        image = image.reduceResolution(ee.Reducer.max())
+
+        asset_path = f"{self.ee_osm_root}/{attribute}/{tag}"
+        return self.export_image_ee(
+            image, asset_path, image_collection=True, pyramiding={".default": "max"}
+        )
+
+    def clean_up(self, **kwargs):
+        if self.status == self.FAILED:
+            return
+
+        ee.data.deleteAsset(self.ee_osm_table)
+
+    def calc(self):
+        if self.ee_osm_table is None:
             if self.csv_file is None:
+                if self.osm_file is None:
+                    self.osm_file = self.download_osm()
+
                 self.csv_file = self.osm_to_csv(self.osm_file)
 
-        if self.csv_file:
-            print(self.import_csv_to_ee_table(self.csv_file))
+            if self.csv_file:
+                self.ee_osm_table = self.import_csv_to_ee_table(self.csv_file)
+
+        for attribute, tags in config.tags.items():
+            for tag in tags:
+                asset_id = self._get_asset_id(attribute, tag, self.taskdate)
+                if self.overwrite is False and self.asset_exists(asset_id) is True:
+                    continue
+                self.rasterize_table(self.ee_osm_table, attribute, tag)
 
 
 if __name__ == "__main__":
@@ -182,6 +223,19 @@ if __name__ == "__main__":
         "--csv_file",
         type=str,
         help="CSV file to upload to Earth Engine.  Format: WKT,tag,burn",
+    )
+
+    parser.add_argument(
+        "-t",
+        "--ee_osm_table",
+        type=str,
+        help="Asset id of OSM table ingested into EE",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing HII tag images for task date",
     )
 
     options = parser.parse_args()
