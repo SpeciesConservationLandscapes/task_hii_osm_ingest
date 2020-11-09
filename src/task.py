@@ -66,7 +66,7 @@ class HIIOSMIngest(HIITask):
 
     def _get_asset_id(self, attribute, tag, task_date):
         root = f"projects/{self.ee_project}/{self.ee_osm_root}"
-        return f"{root}/{attribute}/{tag}_{task_date}"
+        return f"{root}/{attribute}/{tag}/{tag}_{task_date}"
 
     def _upload_to_cloudstorage(self, src_path: str) -> str:
         targ_path = Path(src_path).name
@@ -174,29 +174,40 @@ class HIIOSMIngest(HIITask):
             image, asset_path, image_collection=True, pyramiding={".default": "max"}
         )
 
-    def clean_up(self, **kwargs):
-        if self.status == self.FAILED:
-            return
+    def delete_asset(self, asset_id):
+        ee.data.deleteAsset(asset_id)
 
-        ee.data.deleteAsset(self.ee_osm_table)
+    def import_osm_pbf(self):
+        if self.ee_osm_table:
+            return self.ee_osm_table
+
+        if self.csv_file is None:
+            self.osm_file = self.osm_file or self.download_osm()
+            self.csv_file = self.osm_to_csv(self.osm_file)
+
+        return self.import_csv_to_ee_table(self.csv_file)
 
     def calc(self):
-        if self.ee_osm_table is None:
-            if self.csv_file is None:
-                if self.osm_file is None:
-                    self.osm_file = self.download_osm()
-
-                self.csv_file = self.osm_to_csv(self.osm_file)
-
-            if self.csv_file:
-                self.ee_osm_table = self.import_csv_to_ee_table(self.csv_file)
+        self.ee_osm_table = self.import_osm_pbf()
 
         for attribute, tags in config.tags.items():
             for tag in tags:
                 asset_id = self._get_asset_id(attribute, tag, self.taskdate)
-                if self.overwrite is False and self.asset_exists(asset_id) is True:
+                asset_exists = self.asset_exists(asset_id)
+
+                if self.overwrite is False and asset_exists is True:
                     continue
+
+                if asset_exists:
+                    self.delete_asset(asset_id)
+
                 self.rasterize_table(self.ee_osm_table, attribute, tag)
+
+    def clean_up(self, **kwargs):
+        if self.status == self.FAILED:
+            return
+
+        self.delete_asset(self.ee_osm_table)
 
 
 if __name__ == "__main__":
@@ -226,10 +237,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "-t",
-        "--ee_osm_table",
-        type=str,
-        help="Asset id of OSM table ingested into EE",
+        "-t", "--ee_osm_table", type=str, help="Asset id of OSM table ingested into EE",
     )
 
     parser.add_argument(
