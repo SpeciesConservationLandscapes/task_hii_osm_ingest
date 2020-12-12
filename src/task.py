@@ -1,19 +1,48 @@
 import argparse
 import os
+import json
+import re
 import subprocess
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
+from typing import Any, Dict, Optional, Union
 
 import ee  # type: ignore
 from google.cloud import storage  # type: ignore
 from task_base import HIITask  # type: ignore
 
 import config
-from timer import timing
 
 
 class ConversionException(Exception):
     pass
+
+
+@dataclass
+class Task:
+    id: str
+    attribute: str
+    tag: str
+    is_done: bool = False
+    asset_path: Optional[str] = None
+    operation_type: Optional[str] = None
+    state: Optional[str] = None
+    operation: Optional[dict] = None
+
+    def __str__(self):
+        return self.id
+
+    def update(self, details: Dict[str, Any]):
+        self.asset_path = details.get("asset_path")
+        self.operation_type = details.get("type")
+        self.is_done = True if details.get("is_done") is True else False
+        self.state = details.get("state")
+        self.operation = details.get("operation")
+
+    def to_json(self):
+        return json.dump(asdict(self))
 
 
 class HIIOSMIngest(HIITask):
@@ -21,22 +50,26 @@ class HIIOSMIngest(HIITask):
 
     Process:
 
-    1. Using earthengine CLI load CSV as table (temporary) in EE
-    2. Rasterize EE table for each attribute and tag
-    3. Clean up EE table and Cloud Storage
+    1. For each attribute/tag upload table to EE
+    2. Poll upload tasks and as they finish spin of rasterization task
+    3. Create "roads" table
+    4. Clean up CSV files in Google Storage
+    5. Clean up temp tables in EE
 
     """
 
     ee_osm_root = "osm"
     scale = 100
     google_creds_path = "/.google_creds"
+    project_id = "hii3-246517"
+    EESUCCEEDED = "SUCCEEDED"
 
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
         self._args = kwargs
-        self.csv_uri = self._args.get("csv_uri")
-        self.ee_osm_table = self._args.get("ee_osm_table")
+        self.storage_directory = self._args.get("storage_directory")
+        self.ee_directory = self._args.get("ee_directory")
         self.overwrite = self._args.get("overwrite")
 
         creds_path = Path(self.google_creds_path)
@@ -46,7 +79,15 @@ class HIIOSMIngest(HIITask):
 
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
 
-    def _get_asset_id(self, attribute: str, tag: str, task_date: str) -> str:
+    @property
+    def path_prefix(self):
+        return f"{self.ee_osm_root}/tables/{self.taskdate}"
+
+    def _get_table_asset_id(self, attribute: str, tag: str, task_date: str) -> str:
+        root = f"projects/{self.ee_project}/{self.ee_osm_root}"
+        return f"{root}/tables/{task_date}/{attribute}_{tag}"
+
+    def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
         root = f"projects/{self.ee_project}/{self.ee_osm_root}"
         return f"{root}/{attribute}/{tag}/{tag}_{task_date}"
 
@@ -64,22 +105,39 @@ class HIIOSMIngest(HIITask):
         bucket = client.bucket(os.environ["HII_OSM_BUCKET"])
         bucket.delete_blob(path)
 
-    @timing
-    def _cp_storage_to_ee(self, blob_uri: str) -> str:
-        asset_id = f"projects/{self.ee_project}/_temp_osm_{self.taskdate}"
+    def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
+        if isinstance(output, bytes):
+            text = output.decode("utf-8")
+        else:
+            text = output
+
+        task_id_regex = re.compile(r"(?<=ID: ).*", flags=re.IGNORECASE)
+        try:
+            matches = task_id_regex.search(text)
+            if matches is None:
+                return None
+            return matches[0]
+        except TypeError:
+            return None
+
+    def _cp_storage_to_ee(self, blob_uri: str, asset_name: str) -> str:
+        asset_id = f"projects/{self.ee_project}/{asset_name}"
         try:
             cmd = [
                 "/usr/local/bin/earthengine",
                 f"--service_account_file={self.google_creds_path}",
                 "upload table",
                 "--primary_geometry_column WKT",
-                "--wait 7200",
                 f"--asset_id={asset_id}",
                 blob_uri,
             ]
-
-            subprocess.check_output(" ".join(cmd), stderr=subprocess.STDOUT, shell=True)
-            return asset_id
+            output = subprocess.check_output(
+                " ".join(cmd), stderr=subprocess.STDOUT, shell=True
+            )
+            task_id = self._parse_task_id(output)
+            if task_id is None:
+                raise TypeError("task_id is None")
+            return task_id
         except subprocess.CalledProcessError as err:
             raise ConversionException(err.stdout)
 
@@ -89,13 +147,11 @@ class HIIOSMIngest(HIITask):
         except ee.ee_exception.EEException:
             return False
 
-    @timing
-    def rasterize_table(self, table_asset_id: str, attribute: str, tag: str) -> str:
+    def rasterize_table(self, attribute: str, tag: str) -> str:
+        table_asset_id = self._get_table_asset_id(attribute, tag, self.taskdate)
         table = ee.FeatureCollection(table_asset_id)
 
-        image = table.filter(
-            ee.Filter.stringContains("tag", f"{attribute}={tag}")
-        ).reduceToImage(properties=["burn"], reducer=ee.Reducer.first())
+        image = table.reduceToImage(properties=["burn"], reducer=ee.Reducer.first())
         image = image.reproject(crs="EPSG:4326", scale=self.scale)
         image = image.reduceResolution(ee.Reducer.max())
 
@@ -112,37 +168,142 @@ class HIIOSMIngest(HIITask):
         bucket = client.bucket(os.environ["HII_OSM_BUCKET"])
         return storage.Blob(bucket=bucket, name=Path(uri).name).exists(client)
 
-    def _get_csv_uri(self):
-        return f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}.csv"
+    def _get_csv_uri(self, attribute: str, tag: str) -> str:
+        return (
+            f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}/{attribute}_{tag}.csv"
+        )
 
-    def calc(self):
-        if self.ee_osm_table is None:
-            self.csv_uri = self.csv_uri or self._get_csv_uri()
-            if self._csv_exists(self.csv_uri) is False:
-                raise FileNotFoundError("Missing CSV file")
+    def _parse_operation_response(
+        self, response: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        if isinstance(response, dict) is False:
+            return None
 
-            self.ee_osm_table = self._cp_storage_to_ee(self.csv_uri)
+        name = response.get("name") or ""
+        is_done = response.get("done")
+        metadata = response.get("metadata") or dict()
+        operation_type = metadata.get("type")
+        description = metadata.get("description") or ""
+        state = metadata.get("state") or None
 
-        for attribute, tag in config.tags:
-            asset_id = self._get_asset_id(attribute, tag, self.taskdate)
-            asset_exists = self.asset_exists(asset_id)
+        # fmt: off
+        task_id = name[name.rfind("/") + 1:]
+        # fmt: on
 
-            if self.overwrite is False and asset_exists is True:
+        asset_path_regex = re.compile(
+            f'(?<=[/])projects/{self.ee_project}.*(?=["])', flags=re.IGNORECASE
+        )
+        asset_path = None
+        try:
+            matches = asset_path_regex.search(description)
+            if matches:
+                asset_path = matches[0]
+        except TypeError:
+            asset_path = None
+
+        return dict(
+            asset_path=asset_path,
+            task_id=task_id,
+            type=operation_type,
+            is_done=is_done,
+            state=state,
+            operation=response,
+        )
+
+    def _update_tasks_details(self, tasks: Dict[str, Task]):
+        operations = ee.data.listOperations(project=f"projects/{self.project_id}")
+        for operation_dict in operations:
+            operation = self._parse_operation_response(operation_dict) or dict()
+            task_id = operation["task_id"]
+            if task_id not in tasks:
+                continue
+            tasks[task_id].update(operation)
+
+    def _import_completed_table_imports(self, tasks: Dict[str, Task]):
+        _tasks = dict()
+        for task in tasks.values():
+            if task.is_done is True and task.state == self.EESUCCEEDED:
+                print(f"start rasterization => {task.attribute} - {task.tag}")
+                print(task.to_json())
+                self.rasterize_table(task.attribute, task.tag)
                 continue
 
-            if asset_exists:
-                self.delete_asset(asset_id)
+            elif task.is_done is True:
+                print(task.to_json())
+                continue
 
-            self.rasterize_table(self.ee_osm_table, attribute, tag)
+            print(task.to_json())
+            _tasks[task.id] = task
+
+        return _tasks
+
+    def wait(self):
+        if self.tasks:
+            self._update_tasks_details(tasks=self.tasks)
+
+        n = 2
+        max_n = 10
+        while True:
+            if self.tasks is None or len(self.tasks) == 0:
+                break
+
+            self.tasks = self._import_completed_table_imports(self.tasks)
+            if n > max_n:
+                n = max_n
+
+            sleep(n ** 2)
+            n += 1
+
+            self._update_tasks_details(tasks=self.tasks)
+
+        super().wait()
+
+    def start_csv_imports(self) -> Dict[str, Task]:
+        tags = config.tags
+        self._prep_asset_id(self.path_prefix, False)
+        tasks = dict()
+        taskdate = self.taskdate
+        for attribute, tag in tags:
+            if self.asset_exists(self._get_image_asset_id(attribute, tag, taskdate)) is True:
+                continue
+            
+            if self.asset_exists(self._get_table_asset_id(attribute, tag, taskdate)) is True:
+                self.rasterize_table(attribute, tag)
+                continue
+
+            task_id = self._cp_storage_to_ee(
+                self._get_csv_uri(attribute, tag),
+                f"{self.path_prefix}/{attribute}_{tag}",
+            )
+            tasks[task_id] = Task(id=task_id, attribute=attribute, tag=tag)
+        return tasks
+
+    # TODO: Finish clean up
+    # def remove_existing_data(self):
+    #     # asset_exists(asset_id)
+    #     for attribute, tag in config.tags:
+    #         pass
+
+    def calc(self):
+        if self.ee_directory is None:
+            pass
+
+        if self.overwrite is True:
+            # TODO: REMOVE EXISTING TABLES AND RASTERS
+            print("REMOVE EXISTING TABLES AND RASTERS HERE")
+        #     self.remove_existing_data()
+
+        self.tasks = self.start_csv_imports()
 
     def clean_up(self, **kwargs):
         if self.status == self.FAILED:
             return
 
-        # TODO: Create a new table of highway attributes from table before getting rid of table
+        # TODO: Create a new table of highway attributes
+        # from table before getting rid of table
 
         # self.delete_asset(self.ee_osm_table)
-        self._remove_from_cloudstorage(self._get_csv_uri())
+        # self._remove_from_cloudstorage(self._get_csv_uri())
 
 
 if __name__ == "__main__":
@@ -150,17 +311,17 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--taskdate", default=datetime.now(timezone.utc).date())
 
     parser.add_argument(
-        "-c",
-        "--csv_uri",
+        "-s",
+        "--storage_directory",
         type=str,
-        help="URI to source CSV uri path in Google Cloud Storage.  Format: wkt,tag,burn",
+        help="URI to source CSV directory in Google Cloud Storage",
     )
 
     parser.add_argument(
-        "-t",
-        "--ee_osm_table",
+        "-e",
+        "--ee_directory",
         type=str,
-        help="Asset id of OSM table ingested into EE",
+        help="EE directory path where import OSM tables are located.",
     )
 
     parser.add_argument(
