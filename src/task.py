@@ -29,10 +29,7 @@ class Task:
     asset_path: Optional[str] = None
     operation_type: Optional[str] = None
     state: Optional[str] = None
-
-    # For debug
-    operation: Optional[dict] = None
-    # TODO Include error message
+    error: Optional[dict] = None
 
     def __str__(self):
         return self.id
@@ -43,8 +40,8 @@ class Task:
         self.is_done = True if details.get("is_done") is True else False
         self.state = details.get("state")
 
-        # For debug
-        self.operation = details.get("operation")
+        if self.state == self.EEFAILED:
+            self.error = details.get("error")
 
     def to_json(self):
         return json.dumps(asdict(self))
@@ -73,6 +70,7 @@ class HIIOSMIngest(HIITask):
         super().__init__(self, *args, **kwargs)
 
         self._args = kwargs
+        self.skip_cleanup = self._args.get("skip_cleanup")
         self.storage_directory = self._args.get("storage_directory")
         self.ee_directory = self._args.get("ee_directory")
         self.overwrite = self._args.get("overwrite")
@@ -89,16 +87,17 @@ class HIIOSMIngest(HIITask):
     def path_prefix(self):
         return f"{self.ee_osm_root}/tables/{self.taskdate}"
 
-
-    def _get_table_root_dir(self, task_date: Optional[str]=None) -> str:
+    def _get_table_root_dir(self, task_date: Optional[str] = None) -> str:
         if self.ee_directory is not None:
             return self.ee_directory
         elif task_date is None:
             raise ValueError("task_date is required when ee_directory is not defined.")
         else:
-            return f"projects/{self.ee_project}/{self.ee_osm_root}/{task_date}"
+            return f"projects/{self.ee_project}/{self.ee_osm_root}/tables/{task_date}"
 
-    def _get_table_asset_id(self, attribute: str, tag: str, task_date: Optional[str]=None) -> str:
+    def _get_table_asset_id(
+        self, attribute: str, tag: str, task_date: Optional[str] = None
+    ) -> str:
         root = self._get_table_root_dir(task_date)
         return str(Path(root, f"{attribute}_{tag}"))
 
@@ -109,12 +108,11 @@ class HIIOSMIngest(HIITask):
     def _get_csv_uri(self, attribute: str, tag: str) -> str:
         if self.storage_directory:
             root = self.storage_directory
-            if root.endswith("/") is False:
-                root += "/"
-
+            if root.endswith("/") is True:
+                root = root[0:-1]
         else:
-            root = f"gs://{self.bucket}/{self.taskdate}/"
-        
+            root = f"gs://{self.bucket}/{self.taskdate}"
+
         return f"{root}/{attribute}_{tag}.csv"
 
     def _upload_to_cloudstorage(self, src_path: str) -> str:
@@ -256,7 +254,7 @@ class HIIOSMIngest(HIITask):
 
         return _tasks
 
-    def _called(self):
+    def _check_for_rasterization_ready_tables(self):
         if self.tasks:
             self._update_tasks_details(tasks=self.tasks)
 
@@ -321,15 +319,30 @@ class HIIOSMIngest(HIITask):
         taskdate = self.taskdate
 
         if self.ee_directory is None:
-            # TODO: Is there a check to see if directories exist?
+            # TODO: Is there a check to see if directories exist.
             table_directory = self._get_table_root_dir(taskdate)
-            # TODO: self.rm(table_directory, recursive=True)
+            # self.rm_ee(table_directory)
 
         for attribute, tag in attribute_tags:
             image_asset_id = self._get_image_asset_id(attribute, tag, taskdate)
             if self.asset_exists(image_asset_id) is True:
-                # TODO: self.rm(image_asset_id)
+                self.rm_ee(image_asset_id)
                 pass
+
+    def generate_road_table(self):
+        road_tags = config.road_tags
+        feature_collections = []
+        for attribute, tag in road_tags:
+            feature_collections.append(
+                ee.FeatureCollection(
+                    self._get_table_asset_id(attribute, tag, self.taskdate)
+                )
+            )
+
+        merged_feature_collection = ee.FeatureCollection(feature_collections)
+
+        asset_path = f"{self.ee_osm_root}/roads"
+        self.export_fc_ee(merged_feature_collection, asset_path)
 
     def calc(self):
         if self.overwrite is True:
@@ -339,17 +352,15 @@ class HIIOSMIngest(HIITask):
             self._rasterize_attributes_tags()
         else:
             self.tasks = self.start_csv_imports()
-            self._called()
+            self._check_for_rasterization_ready_tables()
 
-        # TODO: kick off road table creation
-        # call `export_fc_ee()``
+        self.generate_road_table()
 
     def clean_up(self, **kwargs):
-        if self.status == self.FAILED:
+        if self.status == self.FAILED or self.skip_cleanup:
             return
 
-        # TODO: Create a new table of highway attributes
-        # from table before getting rid of table
+        # TODO: Delete cloudstorage tables
         # self._remove_from_cloudstorage(self._get_csv_uri())
 
 
@@ -376,6 +387,12 @@ if __name__ == "__main__":
         "--overwrite",
         action="store_true",
         help="Replace existing HII tag images for task date",
+    )
+
+    parser.add_argument(
+        "--skip_cleanuup",
+        type=bool,
+        help="Skip cleaning up temporary task files",
     )
 
     options = parser.parse_args()
