@@ -41,7 +41,7 @@ class Task:
         self.state = details.get("state")
 
     def to_json(self):
-        return json.dump(asdict(self))
+        return json.dumps(asdict(self))
 
 
 class HIIOSMIngest(HIITask):
@@ -250,7 +250,7 @@ class HIIOSMIngest(HIITask):
 
         return _tasks
 
-    def wait(self):
+    def _called(self):
         if self.tasks:
             self._update_tasks_details(tasks=self.tasks)
 
@@ -268,8 +268,6 @@ class HIIOSMIngest(HIITask):
             n += 1
 
             self._update_tasks_details(tasks=self.tasks)
-
-        super().wait()
 
     def _start_csv_import(
         self, attribute: str, tag: str, taskdate: str
@@ -335,6 +333,10 @@ class HIIOSMIngest(HIITask):
             self._rasterize_attributes_tags()
         else:
             self.tasks = self.start_csv_imports()
+            self._called()
+
+        # TODO: kick off road table creation
+        # call `export_fc_ee()``
 
     def clean_up(self, **kwargs):
         if self.status == self.FAILED:
