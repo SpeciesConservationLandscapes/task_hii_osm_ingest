@@ -29,6 +29,9 @@ class Task:
     asset_path: Optional[str] = None
     operation_type: Optional[str] = None
     state: Optional[str] = None
+
+    # For debug
+    operation: Optional[dict] = None
     # TODO Include error message
 
     def __str__(self):
@@ -39,6 +42,9 @@ class Task:
         self.operation_type = details.get("type")
         self.is_done = True if details.get("is_done") is True else False
         self.state = details.get("state")
+
+        # For debug
+        self.operation = details.get("operation")
 
     def to_json(self):
         return json.dumps(asdict(self))
