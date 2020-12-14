@@ -124,10 +124,17 @@ class HIIOSMIngest(HIITask):
 
         return targ_path
 
-    def _remove_from_cloudstorage(self, path: str):
+    def _remove_from_cloudstorage(self):
+        # Don't clean up cloud storage if directory uri
+        # has been passed in.
+        if self.storage_directory:
+            return
+
         client = storage.Client()
         bucket = client.bucket(self.bucket)
-        bucket.delete_blob(path)
+        blobs = bucket.list_blobs(prefix=f"gs://{self.bucket}/{self.taskdate}")
+        for blob in blobs:
+            blob.delete()
 
     def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
         if isinstance(output, bytes):
@@ -319,9 +326,8 @@ class HIIOSMIngest(HIITask):
         taskdate = self.taskdate
 
         if self.ee_directory is None:
-            # TODO: Is there a check to see if directories exist.
             table_directory = self._get_table_root_dir(taskdate)
-            # self.rm_ee(table_directory)
+            self.rm_ee(table_directory)
 
         for attribute, tag in attribute_tags:
             image_asset_id = self._get_image_asset_id(attribute, tag, taskdate)
@@ -360,8 +366,7 @@ class HIIOSMIngest(HIITask):
         if self.status == self.FAILED or self.skip_cleanup:
             return
 
-        # TODO: Delete cloudstorage tables
-        # self._remove_from_cloudstorage(self._get_csv_uri())
+        self._remove_from_cloudstorage(self._get_csv_uri())
 
 
 if __name__ == "__main__":
