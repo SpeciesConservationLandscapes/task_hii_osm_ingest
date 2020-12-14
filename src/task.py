@@ -391,6 +391,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--skip_cleanup",
+        action="store_true",
         type=bool,
         help="Skip cleaning up temporary task files",
     )
