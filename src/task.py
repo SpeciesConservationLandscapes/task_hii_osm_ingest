@@ -103,9 +103,13 @@ class HIIOSMIngest(HIITask):
     def _get_csv_uri(self, attribute: str, tag: str) -> str:
         if self.storage_directory:
             root = self.storage_directory
+            if root.endswith("/") is False:
+                root += "/"
+
         else:
             root = f"gs://{self.bucket}/{self.taskdate}/"
-        return str(Path(root, f"{attribute}_{tag}.csv"))
+        
+        return f"{root}/{attribute}_{tag}.csv"
 
     def _upload_to_cloudstorage(self, src_path: str) -> str:
         targ_path = Path(src_path).name
