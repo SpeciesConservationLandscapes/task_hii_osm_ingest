@@ -31,6 +31,8 @@ class Task:
     state: Optional[str] = None
     error: Optional[dict] = None
 
+    EEFAILED = "FAILED"
+
     def __str__(self):
         return self.id
 
