@@ -181,6 +181,9 @@ class HIIOSMIngest(HIITask):
 
     def rasterize_table(self, attribute: str, tag: str) -> str:
         table_asset_id = self._get_table_asset_id(attribute, tag, self.taskdate)
+        if self.asset_exists(table_asset_id) is False:
+            return
+
         table = ee.FeatureCollection(table_asset_id)
 
         image = table.reduceToImage(properties=["burn"], reducer=ee.Reducer.first())
@@ -347,7 +350,7 @@ class HIIOSMIngest(HIITask):
                 )
             )
 
-        merged_feature_collection = ee.FeatureCollection(feature_collections)
+        merged_feature_collection = ee.FeatureCollection(feature_collections).flatten()
 
         asset_path = f"{self.ee_osm_root}/roads"
         self.export_fc_ee(merged_feature_collection, asset_path)
