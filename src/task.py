@@ -3,51 +3,20 @@ import json
 import os
 import re
 import subprocess
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from time import sleep
-from typing import Any, Dict, Optional, Union
+from typing import Optional, Union
 
 import ee  # type: ignore
 from google.cloud import storage  # type: ignore
 from task_base import HIITask  # type: ignore
-from timer import Timer
 
 import config
+from timer import Timer
 
 
 class ConversionException(Exception):
     pass
-
-
-@dataclass
-class Task:
-    id: str
-    attribute: str
-    tag: str
-    is_done: bool = False
-    asset_path: Optional[str] = None
-    operation_type: Optional[str] = None
-    state: Optional[str] = None
-    error: Optional[dict] = None
-
-    EEFAILED = "FAILED"
-
-    def __str__(self):
-        return self.id
-
-    def update(self, details: Dict[str, Any]):
-        self.asset_path = details.get("asset_path")
-        self.operation_type = details.get("type")
-        self.is_done = True if details.get("is_done") is True else False
-        self.state = details.get("state")
-
-        if self.state == self.EEFAILED:
-            self.error = details.get("error")
-
-    def to_json(self):
-        return json.dumps(asdict(self))
 
 
 class HIIOSMIngest(HIITask):
@@ -81,13 +50,13 @@ class HIIOSMIngest(HIITask):
                 f.write(self.service_account_key)
 
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
-    
+
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
         client = storage.Client()
         bucket = client.bucket(os.environ["HII_OSM_BUCKET"])
         blob = bucket.blob(blob_uri)
         return json.loads(blob.download_as_text())
-    
+
     def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
         if isinstance(output, bytes):
             text = output.decode("utf-8")
@@ -127,70 +96,81 @@ class HIIOSMIngest(HIITask):
         return f"{self._asset_prefix}/{attribute}/{tag}/{tag}_{task_date}"
 
     # Step 1
-    def import_image_to_ee(self, blob_uri: str, image_asset_id: Optional[str] = None) -> str:
+    def import_image_to_ee(
+        self, blob_uri: str, image_asset_id: Optional[str] = None
+    ) -> str:
         if image_asset_id is None:
             image_asset_id = f"{self._asset_prefix}/osm_raster-{self.taskdate}"
 
         task_id = self._cp_storage_to_ee_image(blob_uri, image_asset_id)
         self.ee_tasks[task_id] = {}
+
         self.wait()
 
         return image_asset_id
-    
+
     # Step 2
-    def import_roads_to_ee(self, blob_uri: str, roads_asset_id: Optional[str] = None) -> str:
+    def import_roads_to_ee(
+        self, blob_uri: str, roads_asset_id: Optional[str] = None
+    ) -> str:
         print("Not implemented")
-    
+
     # Step 3
     def split_image_bands(self, image_metadata_uri: str, image_asset_id: str):
         image_metadata = self._read_merged_image_metadata(image_metadata_uri)
         image = ee.Image(image_asset_id)
 
+        attribute_tags = set([f"{a}-{t}" for a, t in config.tags])
+
         for metadata in image_metadata.values():
-            attribute = metadata.get["attribute"]
-            tag = metadata.get["tag"]
+            attribute = metadata["attribute"]
+            tag = metadata["tag"]
+
+            if f"{attribute}-{tag}" not in attribute_tags:
+                continue
+
             image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
-            bands = metadata["bands"]
-            split_img = ee.ImageCollection(image.select(bands)).or()
+            bands = image.select(metadata["bands"])
+            split_img = ee.ImageCollection(bands).or() # noqa
             self.export_image_ee(split_img, image_asset_id)
 
         self.wait()
 
     # Step 4
-    def clean_up(self):
-        if self.status == self.FAILED or self.skip_cleanup:
+    def clean_assets(self, assets):
+        if self.skip_cleanup:
             return
-        print("Not implemented")
+
+        for asset in assets:
+            self.rm_ee(asset)
 
     def calc(self):
         image_uri = self._args.get("image")
         metadata_uri = self._args.get("metadata")
+        _assets_to_clean = []
 
-        if image_uri is None:
-            image_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}/merged-{self.taskdate}.tif"
-        
-        if metadata_uri is None:
-            metadata_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}/merged-{self.taskdate}.json"
+        try:
+            _base_gs_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}/"
 
-        with Timer("Import multi-band image Storage to EE"):
-            image_asset_id = self.import_image_to_ee(image_uri)
-        
-        with Timer("Import roads table Storage to EE multi-band image"):
-            pass
-    
-        with Timer("Split multi-band image"):
-            self.split_image_bands(metadata_uri, image_asset_id)
-    
-        with Timer("Clean up"):
-            pass
-    
+            if image_uri is None:
+                image_uri = f"{_base_gs_uri}/merged-{self.taskdate}.tif"
 
-    def clean_up(self, **kwargs):
-        pass
-        # if self.status == self.FAILED or self.skip_cleanup:
-        #     return
+            if metadata_uri is None:
+                metadata_uri = f"{_base_gs_uri}/merged-{self.taskdate}.json"
 
-        # self._remove_from_cloudstorage(self._get_csv_uri())
+            with Timer("Import multi-band image Storage to EE"):
+                image_asset_id = self.import_image_to_ee(image_uri)
+                _assets_to_clean.append(image_asset_id)
+
+            with Timer("Import roads table Storage to EE multi-band image"):
+                self.import_roads_to_ee(None, None)
+
+            with Timer("Split multi-band image"):
+                self.split_image_bands(metadata_uri, image_asset_id)
+
+        finally:
+            with Timer("Clean up"):
+                self.clean_assets(_assets_to_clean)
 
 
 if __name__ == "__main__":
