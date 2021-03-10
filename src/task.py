@@ -131,7 +131,7 @@ class HIIOSMIngest(HIITask):
 
             image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
             bands = image.select(metadata["bands"])
-            split_img = ee.ImageCollection(bands).or() # noqa
+            split_img = ee.ImageCollection(bands).Or()
             self.export_image_ee(split_img, image_asset_id)
 
         self.wait()
