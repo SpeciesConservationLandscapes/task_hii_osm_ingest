@@ -9,7 +9,7 @@ from typing import Optional, Union, List
 
 import ee  # type: ignore
 from google.cloud import storage  # type: ignore
-from task_base import HIITask  # type: ignore
+from task_base import HIITask, PROJECTS  # type: ignore
 
 import config
 from timer import Timer
@@ -37,12 +37,12 @@ class HIIOSMIngest(HIITask):
     google_creds_path = "/.google_creds"
     project_id = "hii3-246517"
     EESUCCEEDED = "SUCCEEDED"
-    _asset_prefix = f"projects/{HIITask.ee_project}/{ee_osm_root}"
 
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
         self._args = kwargs
+        self.skip_cleanup = self._args["skip_cleanup"]
 
         creds_path = Path(self.google_creds_path)
         self.service_account_key = os.environ["SERVICE_ACCOUNT_KEY"]
@@ -77,7 +77,7 @@ class HIIOSMIngest(HIITask):
         try:
             cmd = [
                 "/usr/local/bin/earthengine",
-                f"--service_account_file={self.google_creds_path}",
+                f"--service_account_file {self.google_creds_path}",
                 "upload image",
                 "--nodata_value=0",
                 f"--asset_id={image_asset_id}",
@@ -97,7 +97,7 @@ class HIIOSMIngest(HIITask):
         try:
             cmd = [
                 "/usr/local/bin/earthengine",
-                f"--service_account_file={self.google_creds_path}",
+                f"--service_account_file {self.google_creds_path}",
                 "upload table",
                 "--primary_geometry_column wkt",
                 f"--asset_id={table_asset_id}",
@@ -114,7 +114,7 @@ class HIIOSMIngest(HIITask):
             raise ConversionException(err.stdout)
 
     def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
-        return f"{self._asset_prefix}/{attribute}/{tag}/{tag}_{task_date}"
+        return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
 
     # Step 1
     def import_images_to_ee(
@@ -125,12 +125,12 @@ class HIIOSMIngest(HIITask):
         if not image_uris:
             return []
         
-        ee_dir = f"{self._asset_prefix}/{self.taskdate}"
+        ee_dir = f"{self.ee_osm_root}/{self.taskdate}"
         self._prep_asset_id(ee_dir, image_collection=False)
 
         image_asset_ids = []
         for image_uri in image_uris:
-            image_asset_id = f"{ee_dir}/{Path(image_uri).name}"
+            image_asset_id = f"{PROJECTS}/{self.ee_project}/{ee_dir}/{Path(os.path.splitext(image_uri)[0]).name}"
             task_id = self._cp_storage_to_ee_image(image_uri, image_asset_id)
             self.ee_tasks[task_id] = {}
             image_asset_ids.append(image_asset_id)
@@ -174,7 +174,7 @@ class HIIOSMIngest(HIITask):
         for meta in image_metadata.values():
             attribute = meta["attribute"]
             tag = meta["tag"]
-            band_indices = meta["bands"]
+            band_indices = [b - 1 for b in meta["bands"]]
 
             if f"{attribute}-{tag}" not in attribute_tags:
                 continue
@@ -182,11 +182,13 @@ class HIIOSMIngest(HIITask):
             bands = []
             for stacked_img_asset_id in stacked_image_asset_ids:
                 image = ee.Image(stacked_img_asset_id)
-                bands.append(image.select(band_indices))
+                bands.append(image.select(*band_indices))
             
-            split_img = ee.ImageCollection(bands).Or()
             image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
-            self.export_image_ee(split_img, image_asset_id)
+            self.export_image_ee(
+                ee.ImageCollection(bands).Or(),
+                image_asset_id
+            )
 
         # self.wait()
 
@@ -205,23 +207,43 @@ class HIIOSMIngest(HIITask):
         _assets_to_clean = []
 
         try:
-            _base_gs_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}/"
+            # _base_gs_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}"
 
             if metadata_uri is None:
-                metadata_uri = f"{_base_gs_uri}/metadata.json"
+                metadata_uri = f"{self.taskdate}/metadata.json"
+
+            print(f"metadata_uri: {metadata_uri}")
 
             metadata = self._read_merged_image_metadata(metadata_uri)
 
-            with Timer("Import multi-band images Storage to EE"):
-                image_asset_ids = self.import_images_to_ee(metadata)
-                _assets_to_clean.extend(image_asset_ids)
+            # with Timer("Import multi-band images Storage to EE"):
+            #     image_asset_ids = self.import_images_to_ee(metadata)
+            #     _assets_to_clean.extend(image_asset_ids)
 
             with Timer("Split multi-band image"):
+                image_asset_ids = [
+                    "projects/HII/v1/osm/2021-03-13/stacked-1",
+                    "projects/HII/v1/osm/2021-03-13/stacked-2",
+                    "projects/HII/v1/osm/2021-03-13/stacked-3",
+                    "projects/HII/v1/osm/2021-03-13/stacked-4",
+                    "projects/HII/v1/osm/2021-03-13/stacked-5",
+                    "projects/HII/v1/osm/2021-03-13/stacked-6",
+                    "projects/HII/v1/osm/2021-03-13/stacked-7",
+                    "projects/HII/v1/osm/2021-03-13/stacked-8",
+                    "projects/HII/v1/osm/2021-03-13/stacked-9",
+                    "projects/HII/v1/osm/2021-03-13/stacked-10",
+                    "projects/HII/v1/osm/2021-03-13/stacked-11",
+                    "projects/HII/v1/osm/2021-03-13/stacked-12",
+                    "projects/HII/v1/osm/2021-03-13/stacked-13",
+                    "projects/HII/v1/osm/2021-03-13/stacked-14",
+                    "projects/HII/v1/osm/2021-03-13/stacked-15",
+                    "projects/HII/v1/osm/2021-03-13/stacked-16",
+                ]
                 self.split_image_bands(image_asset_ids, metadata)
 
-            with Timer("Import roads table Storage to EE table"):
-                roads_asset_id = f"{self._asset_prefix}/roads/roads_{self.taskdate}"
-                self.import_roads_to_ee(metadata["roads"], roads_asset_id)
+            # with Timer("Import roads table Storage to EE table"):
+            #     roads_asset_id = f"{PROJECTS}/{self.ee_project}/{self.ee_osm_root}/roads/roads_{self.taskdate}"
+            #     self.import_roads_to_ee(metadata["road"], roads_asset_id)
             
 
             self.wait()
