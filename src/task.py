@@ -182,7 +182,8 @@ class HIIOSMIngest(HIITask):
             bands = []
             for stacked_img_asset_id in stacked_image_asset_ids:
                 image = ee.Image(stacked_img_asset_id)
-                bands.append(image.select(*band_indices))
+                for b in band_indices:
+                    bands.append(image.select([b], ["b1"]))
             
             image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
             self.export_image_ee(
