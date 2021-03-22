@@ -59,11 +59,7 @@ class HIIOSMIngest(HIITask):
         return json.loads(blob.download_as_text())
 
     def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
-        if isinstance(output, bytes):
-            text = output.decode("utf-8")
-        else:
-            text = output
-
+        text = output.decode("utf-8") if isinstance(output, bytes) is True else output
         task_id_regex = re.compile(r"(?<=ID: ).*", flags=re.IGNORECASE)
         try:
             matches = task_id_regex.search(text)
@@ -147,114 +143,69 @@ class HIIOSMIngest(HIITask):
         self.ee_tasks[task_id] = {}
 
     # Step 3
-    # def split_image_bands(self, image_asset_ids: List[str], metadata: dict):
-    #     image_metadata = metadata["images"]
+    def group_bands(self, image_asset_ids: List[str], metadata: dict) -> str:
+        band_names = [f"{at['attribute']}_{at['tag']}" for at in metadata["bands"].values()]
+        image_stack = ee.ImageCollection.fromImages([ee.Image(i) for i in image_asset_ids])
+        bands = ee.List(list(metadata["bands"].values()))
+        projection = ee.Image(image_asset_ids[0]).projection()
 
-    #     image = ee.Image(image_asset_id)
+        def band_merge(attr_tag_meta):
+            atm = ee.Dictionary(attr_tag_meta)
+            _bands = ee.List(atm.get("bands"))
+            attribute = atm.get("attribute")
+            tag = atm.get("tag")
 
-    #     attribute_tags = set([f"{a}-{t}" for a, t in config.tags])
+            band_indices = _bands.map(lambda x: ee.Number(x).subtract(ee.Number(1)))
+            band_name = ee.String(attribute).cat(ee.String("_").cat(tag))
+            return image_stack.select(band_indices) \
+                .mosaic() \
+                .reduce(ee.Reducer.max()) \
+                .rename(band_name) \
+                .reproject(projection)
 
-    #     for metadata in image_metadata.values():
-    #         attribute = metadata["attribute"]
-    #         tag = metadata["tag"]
+        img_col = ee.ImageCollection(bands.map(band_merge))
+        img = img_col.toBands().rename(band_names)
+        asset_path = f"{self.ee_osm_root}/osm_image"
+        self.export_image_ee(img, asset_path, image_collection=False)
 
-    #         if f"{attribute}-{tag}" not in attribute_tags:
-    #             continue
-
-    #         image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
-    #         bands = image.select(metadata["bands"])
-    #         split_img = ee.ImageCollection(bands).Or()
-    #         self.export_image_ee(split_img, image_asset_id)
-
-    #     self.wait()
-    def split_image_bands(self, stacked_image_asset_ids: List[str], metadata: dict):
-        image_metadata = metadata["bands"]
-
-        attribute_tags = set([f"{a}-{t}" for a, t in config.tags])
-        for meta in image_metadata.values():
-            attribute = meta["attribute"]
-            tag = meta["tag"]
-            band_indices = [b - 1 for b in meta["bands"]]
-
-            if f"{attribute}-{tag}" not in attribute_tags:
-                continue
-
-            bands = []
-            for stacked_img_asset_id in stacked_image_asset_ids:
-                image = ee.Image(stacked_img_asset_id)
-                for b in band_indices:
-                    bands.append(image.select([b], ["b1"]))
-            
-            image_asset_id = self._get_image_asset_id(attribute, tag, self.taskdate)
-            self.export_image_ee(
-                ee.ImageCollection(bands).Or(),
-                image_asset_id
-            )
-
-        # self.wait()
-
+        return asset_path
+    
     # Step 4
     def clean_assets(self, assets):
         if self.skip_cleanup:
             return
 
-        print("Not implemented")
-
-        # for asset in assets:
-        #     self.rm_ee(asset)
+        for asset in assets:
+            self.rm_ee(asset)
 
     def calc(self):
         metadata_uri = self._args.get("metadata")
         _assets_to_clean = []
 
         try:
-            # _base_gs_uri = f"gs://{os.environ['HII_OSM_BUCKET']}/{self.taskdate}"
-
             if metadata_uri is None:
                 metadata_uri = f"{self.taskdate}/metadata.json"
 
-            print(f"metadata_uri: {metadata_uri}")
-
             metadata = self._read_merged_image_metadata(metadata_uri)
 
-            # with Timer("Import multi-band images Storage to EE"):
-            #     image_asset_ids = self.import_images_to_ee(metadata)
-            #     _assets_to_clean.extend(image_asset_ids)
+            with Timer("Import multi-band images Storage to EE"):
+                image_asset_ids = self.import_images_to_ee(metadata)
+                _assets_to_clean.extend(image_asset_ids)
 
-            with Timer("Split multi-band image"):
-                image_asset_ids = [
-                    "projects/HII/v1/osm/2021-03-13/stacked-1",
-                    "projects/HII/v1/osm/2021-03-13/stacked-2",
-                    "projects/HII/v1/osm/2021-03-13/stacked-3",
-                    "projects/HII/v1/osm/2021-03-13/stacked-4",
-                    "projects/HII/v1/osm/2021-03-13/stacked-5",
-                    "projects/HII/v1/osm/2021-03-13/stacked-6",
-                    "projects/HII/v1/osm/2021-03-13/stacked-7",
-                    "projects/HII/v1/osm/2021-03-13/stacked-8",
-                    "projects/HII/v1/osm/2021-03-13/stacked-9",
-                    "projects/HII/v1/osm/2021-03-13/stacked-10",
-                    "projects/HII/v1/osm/2021-03-13/stacked-11",
-                    "projects/HII/v1/osm/2021-03-13/stacked-12",
-                    "projects/HII/v1/osm/2021-03-13/stacked-13",
-                    "projects/HII/v1/osm/2021-03-13/stacked-14",
-                    "projects/HII/v1/osm/2021-03-13/stacked-15",
-                    "projects/HII/v1/osm/2021-03-13/stacked-16",
-                ]
-                self.split_image_bands(image_asset_ids, metadata)
+            with Timer("Group image bands"):
+                self.group_bands(image_asset_ids, metadata)
 
-            # with Timer("Import roads table Storage to EE table"):
-            #     roads_asset_id = f"{PROJECTS}/{self.ee_project}/{self.ee_osm_root}/roads/roads_{self.taskdate}"
-            #     self.import_roads_to_ee(metadata["road"], roads_asset_id)
-            
+            with Timer("Import roads table Storage to EE table"):
+                osm_roads_dir = f"{self.ee_osm_root}/roads"
+                roads_dir = f"{PROJECTS}/{self.ee_project}/{osm_roads_dir}"
+                self._prep_asset_id(osm_roads_dir)
+                roads_asset_id = f"{roads_dir}/roads_{self.taskdate}"
+                self.import_roads_to_ee(metadata["road"], roads_asset_id)
 
             self.wait()
         finally:
             with Timer("Clean up"):
                 self.clean_assets(_assets_to_clean)
-    
-    def clean_up(self):
-        pass
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
