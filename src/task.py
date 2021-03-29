@@ -24,11 +24,10 @@ class HIIOSMIngest(HIITask):
 
     Process:
 
-    1. For each attribute/tag upload table to EE
-    2. Poll upload tasks and as they finish spin of rasterization task
-    3. Create "roads" table
-    4. Clean up CSV files in Google Storage
-    5. Clean up temp tables in EE
+    1. Import split images from Google Storage into Earth Engine
+    2. Import roads from Google Storage into Earth Engine
+    3. Group bands from imported images into a single image
+    4. Clean split images
 
     """
 
@@ -36,7 +35,6 @@ class HIIOSMIngest(HIITask):
     scale = 100
     google_creds_path = "/.google_creds"
     project_id = "hii3-246517"
-    EESUCCEEDED = "SUCCEEDED"
 
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
@@ -166,7 +164,7 @@ class HIIOSMIngest(HIITask):
         img_col = ee.ImageCollection(bands.map(band_merge))
         img = img_col.toBands().rename(band_names)
         asset_path = f"{self.ee_osm_root}/osm_image"
-        self.export_image_ee(img, asset_path, image_collection=False)
+        self.export_image_ee(img, asset_path, image_collection=True)
 
         return asset_path
     
