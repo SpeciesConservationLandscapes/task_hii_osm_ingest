@@ -193,12 +193,12 @@ class HIIOSMIngest(HIITask):
             with Timer("Group image bands"):
                 self.group_bands(image_asset_ids, metadata)
 
-            with Timer("Import roads table Storage to EE table"):
-                osm_roads_dir = f"{self.ee_osm_root}/roads"
-                roads_dir = f"{PROJECTS}/{self.ee_project}/{osm_roads_dir}"
-                self._prep_asset_id(osm_roads_dir)
-                roads_asset_id = f"{roads_dir}/roads_{self.taskdate}"
-                self.import_roads_to_ee(metadata["road"], roads_asset_id)
+            # with Timer("Import roads table Storage to EE table"):
+            #     osm_roads_dir = f"{self.ee_osm_root}/roads"
+            #     roads_dir = f"{PROJECTS}/{self.ee_project}/{osm_roads_dir}"
+            #     self._prep_asset_id(osm_roads_dir)
+            #     roads_asset_id = f"{roads_dir}/roads_{self.taskdate}"
+            #     self.import_roads_to_ee(metadata["road"], roads_asset_id)
 
             self.wait()
         finally:
