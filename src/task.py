@@ -41,6 +41,7 @@ class HIIOSMIngest(HIITask):
 
         self._args = kwargs
         self.skip_cleanup = self._args["skip_cleanup"]
+        self.output_image = self._args["output_image"]
 
         creds_path = Path(self.google_creds_path)
         self.service_account_key = os.environ["SERVICE_ACCOUNT_KEY"]
@@ -86,7 +87,7 @@ class HIIOSMIngest(HIITask):
             return task_id
         except subprocess.CalledProcessError as err:
             raise ConversionException(err.stdout)
-    
+
     def _cp_storage_to_ee_table(self, blob_uri: str, table_asset_id: str) -> str:
         try:
             cmd = [
@@ -114,11 +115,11 @@ class HIIOSMIngest(HIITask):
     def import_images_to_ee(
         self, metadata: dict, image_asset_id: Optional[str] = None
     ) -> List[str]:
-        
+
         image_uris = metadata.get("images") or []
         if not image_uris:
             return []
-        
+
         ee_dir = f"{self.ee_osm_root}/{self.taskdate}"
         self._prep_asset_id(ee_dir, image_collection=False)
 
@@ -142,8 +143,12 @@ class HIIOSMIngest(HIITask):
 
     # Step 3
     def group_bands(self, image_asset_ids: List[str], metadata: dict) -> str:
-        band_names = [f"{at['attribute']}_{at['tag']}" for at in metadata["bands"].values()]
-        image_stack = ee.ImageCollection.fromImages([ee.Image(i) for i in image_asset_ids])
+        band_names = [
+            f"{at['attribute']}_{at['tag']}" for at in metadata["bands"].values()
+        ]
+        image_stack = ee.ImageCollection.fromImages(
+            [ee.Image(i) for i in image_asset_ids]
+        )
         bands = ee.List(list(metadata["bands"].values()))
         projection = ee.Image(image_asset_ids[0]).projection()
 
@@ -155,19 +160,21 @@ class HIIOSMIngest(HIITask):
 
             band_indices = _bands.map(lambda x: ee.Number(x).subtract(ee.Number(1)))
             band_name = ee.String(attribute).cat(ee.String("_").cat(tag))
-            return image_stack.select(band_indices) \
-                .mosaic() \
-                .reduce(ee.Reducer.max()) \
-                .rename(band_name) \
+            return (
+                image_stack.select(band_indices)
+                .mosaic()
+                .reduce(ee.Reducer.max())
+                .rename(band_name)
                 .reproject(projection)
+            )
 
         img_col = ee.ImageCollection(bands.map(band_merge))
         img = img_col.toBands().rename(band_names)
-        asset_path = f"{self.ee_osm_root}/osm_image"
+        asset_path = f"{self.ee_osm_root}/{self.output_image}"
         self.export_image_ee(img, asset_path, image_collection=True)
 
         return asset_path
-    
+
     # Step 4
     def clean_assets(self, assets):
         if self.skip_cleanup:
@@ -205,27 +212,33 @@ class HIIOSMIngest(HIITask):
             with Timer("Clean up"):
                 self.clean_assets(_assets_to_clean)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("-d", "--taskdate", default=datetime.now(timezone.utc).date())
 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("-d", "--taskdate", default=datetime.now(timezone.utc).date())
     parser.add_argument(
         "-m",
         "--metadata",
         type=str,
         help="Google cloud storage uri for multi-band image json metadata file.",
     )
-
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace existing HII tag images for task date",
     )
-
     parser.add_argument(
         "--skip_cleanup",
         action="store_true",
         help="Skip cleaning up temporary task files",
+    )
+    parser.add_argument(
+        "--output_image",
+        type=str,
+        default="osm_image",
+        help="Custom output EE image name",
     )
 
     options = parser.parse_args()
