@@ -11,7 +11,6 @@ import ee  # type: ignore
 from google.cloud import storage  # type: ignore
 from task_base import HIITask, PROJECTS  # type: ignore
 
-import config
 from timer import Timer
 
 
@@ -32,7 +31,7 @@ class HIIOSMIngest(HIITask):
     """
 
     ee_osm_root = "osm"
-    scale = 100
+    scale = 300
     google_creds_path = "/.google_creds"
     project_id = "hii3-246517"
 
