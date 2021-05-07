@@ -111,9 +111,7 @@ class HIIOSMIngest(HIITask):
         return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
 
     # Step 1
-    def import_images_to_ee(
-        self, metadata: dict, image_asset_id: Optional[str] = None
-    ) -> List[str]:
+    def import_images_to_ee(self, metadata: dict) -> List[str]:
 
         image_uris = metadata.get("images") or []
         if not image_uris:
