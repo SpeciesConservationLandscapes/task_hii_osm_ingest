@@ -37,9 +37,17 @@ class HIIOSMIngest(HIITask):
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
-        self.metadata_uri = kwargs.get("metadata") or os.environ.get("metadata") or f"{self.taskdate}/metadata.json"
-        self.skip_cleanup = kwargs.get("skip_cleanup") or os.environ.get("skip_cleanup") or False
-        self.output_image = kwargs.get("output_image") or os.environ.get("output_image") or "osm_image"
+        self.metadata_uri = (
+            kwargs.get("metadata")
+            or os.environ.get("metadata")
+            or f"{self.taskdate}/metadata.json"
+        )
+        self.skip_cleanup = (
+            kwargs.get("skip_cleanup") or os.environ.get("skip_cleanup") or False
+        )
+        self.output_image = (
+            kwargs.get("output_image") or os.environ.get("output_image") or "osm_image"
+        )
 
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
         client = storage.Client()
