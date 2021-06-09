@@ -32,23 +32,14 @@ class HIIOSMIngest(HIITask):
 
     ee_osm_root = "osm"
     scale = 300
-    google_creds_path = "/.google_creds"
     project_id = "hii3-246517"
 
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
-        self._args = kwargs
-        self.skip_cleanup = self._args["skip_cleanup"]
-        self.output_image = self._args["output_image"]
-
-        creds_path = Path(self.google_creds_path)
-        self.service_account_key = os.environ["SERVICE_ACCOUNT_KEY"]
-        if creds_path.exists() is False:
-            with open(creds_path, "w") as f:
-                f.write(self.service_account_key)
-
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.google_creds_path
+        self.metadata_uri = kwargs.get("metadata") or os.environ.get("metadata") or f"{self.taskdate}/metadata.json"
+        self.skip_cleanup = kwargs.get("skip_cleanup") or os.environ.get("skip_cleanup") or False
+        self.output_image = kwargs.get("output_image") or os.environ.get("output_image") or "osm_image"
 
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
         client = storage.Client()
@@ -181,14 +172,10 @@ class HIIOSMIngest(HIITask):
             self.rm_ee(asset)
 
     def calc(self):
-        metadata_uri = self._args.get("metadata")
         _assets_to_clean = []
 
         try:
-            if metadata_uri is None:
-                metadata_uri = f"{self.taskdate}/metadata.json"
-
-            metadata = self._read_merged_image_metadata(metadata_uri)
+            metadata = self._read_merged_image_metadata(self.metadata_uri)
 
             with Timer("Import multi-band images Storage to EE"):
                 image_asset_ids = self.import_images_to_ee(metadata)
@@ -214,7 +201,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("-d", "--taskdate", default=datetime.now(timezone.utc).date())
+    parser.add_argument("-d", "--taskdate")
     parser.add_argument(
         "-m",
         "--metadata",
@@ -224,7 +211,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing HII tag images for task date",
+        help="overwrite existing outputs instead of incrementing",
     )
     parser.add_argument(
         "--skip_cleanup",
@@ -234,7 +221,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_image",
         type=str,
-        default="osm_image",
         help="Custom output EE image name",
     )
 
