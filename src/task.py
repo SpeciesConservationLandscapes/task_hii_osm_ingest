@@ -1,21 +1,14 @@
 import argparse
 import json
 import os
-import re
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Union, List
+from typing import Optional, List
 
 import ee  # type: ignore
 from google.cloud import storage  # type: ignore
 from task_base import HIITask, PROJECTS  # type: ignore
 
 from timer import Timer
-
-
-class ConversionException(Exception):
-    pass
 
 
 class HIIOSMIngest(HIITask):
@@ -30,8 +23,8 @@ class HIIOSMIngest(HIITask):
 
     """
 
+    DEFAULT_BUCKET = os.environ["HII_OSM_BUCKET"]
     ee_osm_root = "osm"
-    scale = 300
     project_id = "hii3-246517"
 
     def __init__(self, *args, **kwargs):
@@ -50,61 +43,9 @@ class HIIOSMIngest(HIITask):
         )
 
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
-        client = storage.Client()
-        bucket = client.bucket(os.environ["HII_OSM_BUCKET"])
+        bucket = self.gcsclient.get_bucket(self.DEFAULT_BUCKET)
         blob = bucket.blob(blob_uri)
         return json.loads(blob.download_as_text())
-
-    def _parse_task_id(self, output: Union[str, bytes]) -> Optional[str]:
-        text = output.decode("utf-8") if isinstance(output, bytes) is True else output
-        task_id_regex = re.compile(r"(?<=ID: ).*", flags=re.IGNORECASE)
-        try:
-            matches = task_id_regex.search(text)
-            if matches is None:
-                return None
-            return matches[0]
-        except TypeError:
-            return None
-
-    def _cp_storage_to_ee_image(self, blob_uri: str, image_asset_id: str) -> str:
-        try:
-            cmd = [
-                "/usr/local/bin/earthengine",
-                f"--service_account_file {self.google_creds_path}",
-                "upload image",
-                "--nodata_value=0",
-                f"--asset_id={image_asset_id}",
-                blob_uri,
-            ]
-            output = subprocess.check_output(
-                " ".join(cmd), stderr=subprocess.STDOUT, shell=True
-            )
-            task_id = self._parse_task_id(output)
-            if task_id is None:
-                raise TypeError("task_id is None")
-            return task_id
-        except subprocess.CalledProcessError as err:
-            raise ConversionException(err.stdout)
-
-    def _cp_storage_to_ee_table(self, blob_uri: str, table_asset_id: str) -> str:
-        try:
-            cmd = [
-                "/usr/local/bin/earthengine",
-                f"--service_account_file {self.google_creds_path}",
-                "upload table",
-                "--primary_geometry_column wkt",
-                f"--asset_id={table_asset_id}",
-                blob_uri,
-            ]
-            output = subprocess.check_output(
-                " ".join(cmd), stderr=subprocess.STDOUT, shell=True
-            )
-            task_id = self._parse_task_id(output)
-            if task_id is None:
-                raise TypeError("task_id is None")
-            return task_id
-        except subprocess.CalledProcessError as err:
-            raise ConversionException(err.stdout)
 
     def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
         return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
@@ -122,8 +63,7 @@ class HIIOSMIngest(HIITask):
         image_asset_ids = []
         for image_uri in image_uris:
             image_asset_id = f"{PROJECTS}/{self.ee_project}/{ee_dir}/{Path(os.path.splitext(image_uri)[0]).name}"
-            task_id = self._cp_storage_to_ee_image(image_uri, image_asset_id)
-            self.ee_tasks[task_id] = {}
+            task_id = self.storage2image(image_uri, image_asset_id, nodataval=0)
             image_asset_ids.append(image_asset_id)
 
         self.wait()
@@ -134,8 +74,8 @@ class HIIOSMIngest(HIITask):
     def import_roads_to_ee(
         self, blob_uri: str, roads_asset_id: Optional[str] = None
     ) -> str:
-        task_id = self._cp_storage_to_ee_table(blob_uri, roads_asset_id)
-        self.ee_tasks[task_id] = {}
+        task_id = self.storage2table(blob_uri, roads_asset_id, geometry_column="wkt")
+        self.wait()
 
     # Step 3
     def group_bands(self, image_asset_ids: List[str], metadata: dict) -> str:
@@ -199,7 +139,6 @@ class HIIOSMIngest(HIITask):
             #     roads_asset_id = f"{roads_dir}/roads_{self.taskdate}"
             #     self.import_roads_to_ee(metadata["road"], roads_asset_id)
 
-            self.wait()
         finally:
             with Timer("Clean up"):
                 self.clean_assets(_assets_to_clean)
