@@ -23,7 +23,7 @@ class HIIOSMIngest(HIITask):
 
     """
 
-    DEFAULT_BUCKET = os.environ["HII_OSM_BUCKET"]
+    DEFAULT_BUCKET = os.environ.get("HII_OSM_BUCKET", "hii-osm")
     ee_osm_root = "osm"
     project_id = "hii3-246517"
 

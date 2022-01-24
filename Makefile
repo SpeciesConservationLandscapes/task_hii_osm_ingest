@@ -8,7 +8,7 @@ run:
 	@docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint python $(IMAGE) task.py --skip_cleanup
 
 shell:
-	@docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint sh $(IMAGE)
+	@docker run --env-file=.env -v `pwd`/src:/app --rm -it --entrypoint bash $(IMAGE)
 
 cleanup:
 	isort `pwd`/src/*.py
