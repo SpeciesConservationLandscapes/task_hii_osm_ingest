@@ -9,12 +9,13 @@ HII OSM Ingest
 4. Clean split images
 
 
-
 ## Environment Variables
 
 ```
 SERVICE_ACCOUNT_KEY=<GOOGLE SERVICE ACCOUNT KEY>
-HII_OSM_BUCKET=hii-osm
+DEFAULT_BUCKET = os.environ.get("HII_OSM_BUCKET", "hii-osm")
+ee_osm_root = "osm"
+project_id = "hii3-246517"
 ```
 
 ## Usage
@@ -35,3 +36,11 @@ optional arguments:
   --output_image OUTPUT_IMAGE
                         Custom output EE image name (default: None)
 ```
+
+### License
+Copyright (C) 2022 Wildlife Conservation Society
+The files in this repository  are part of the task framework for calculating 
+Human Impact Index and Species Conservation Landscapes (https://github.com/SpeciesConservationLandscapes) 
+and are released under the GPL license:
+https://www.gnu.org/licenses/#GPL
+See [LICENSE](./LICENSE) for details.
