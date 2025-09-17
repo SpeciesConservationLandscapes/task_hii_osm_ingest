@@ -25,8 +25,7 @@ class HIIOSMIngest(HIITask):
 
     DEFAULT_BUCKET = os.environ.get("HII_OSM_BUCKET", "hii-osm")
     ee_osm_root = "osm"
-    project_id = "hii3-246517"
-
+    
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
@@ -43,12 +42,24 @@ class HIIOSMIngest(HIITask):
         )
 
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
-        bucket = self.gcsclient.get_bucket(self.DEFAULT_BUCKET)
-        blob = bucket.blob(blob_uri)
+        bucket_name = self.DEFAULT_BUCKET
+        blob_name = blob_uri
+        prefix = f"gs://{bucket_name}/"
+        if blob_name.startswith(prefix):
+            blob_name = blob_name[len(prefix) :]
+
+        bucket = self.gcsclient.get_bucket(bucket_name)
+        blob = bucket.blob(blob_name)
         return json.loads(blob.download_as_text())
 
-    def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
-        return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
+    # def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
+    #     return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
+
+    def _uri_to_asset_id(self,uri:str):
+        """Map source GCS URIs to new destination GEE asset id"""
+        uri_p = Path(uri)
+        asset = f"{uri_p.parent.stem}/{uri_p.stem}"
+        return f"{self.ee_cloud_asset_root}/{self.ee_osm_root}/{asset}"
 
     # Step 1
     def import_images_to_ee(self, metadata: dict) -> List[str]:
@@ -62,7 +73,7 @@ class HIIOSMIngest(HIITask):
 
         image_asset_ids = []
         for image_uri in image_uris:
-            image_asset_id = f"{PROJECTS}/{self.ee_project}/{ee_dir}/{Path(os.path.splitext(image_uri)[0]).name}"
+            image_asset_id = self._uri_to_asset_id(image_uri)
             task_id = self.storage2image(image_uri, image_asset_id, nodataval=0)
             image_asset_ids.append(image_asset_id)
 
@@ -108,7 +119,9 @@ class HIIOSMIngest(HIITask):
         img = img_col.toBands().rename(band_names)
         asset_path = f"{self.ee_osm_root}/{self.output_image}"
         self.export_image_ee(img, asset_path, image_collection=True)
-
+        
+        self.wait()
+        
         return asset_path
 
     # Step 4
@@ -117,7 +130,7 @@ class HIIOSMIngest(HIITask):
             return
 
         for asset in assets:
-            self.rm_ee(asset)
+            self._rm_ee(asset)
 
     def calc(self):
         _assets_to_clean = []
