@@ -25,8 +25,9 @@ class HIIOSMIngest(HIITask):
 
     DEFAULT_BUCKET = os.environ.get("HII_OSM_BUCKET", "hii-osm")
     ee_osm_root = "osm"
-    project_id = "hii3-246517"
+    asset_prefix = f"projects/{HIITask.ee_project}/assets/{ee_osm_root}"
 
+    
     def __init__(self, *args, **kwargs):
         super().__init__(self, *args, **kwargs)
 
@@ -38,17 +39,34 @@ class HIIOSMIngest(HIITask):
         self.skip_cleanup = (
             kwargs.get("skip_cleanup") or os.environ.get("skip_cleanup") or False
         )
+        
+        self.import_roads = (
+            kwargs.get("import_roads") or os.environ.get("import_roads") or False
+        )
+        
         self.output_image = (
             kwargs.get("output_image") or os.environ.get("output_image") or "osm_image"
         )
 
     def _read_merged_image_metadata(self, blob_uri: str) -> Path:
-        bucket = self.gcsclient.get_bucket(self.DEFAULT_BUCKET)
-        blob = bucket.blob(blob_uri)
+        bucket_name = self.DEFAULT_BUCKET
+        blob_name = blob_uri
+        prefix = f"gs://{bucket_name}/"
+        if blob_name.startswith(prefix):
+            blob_name = blob_name[len(prefix) :]
+
+        bucket = self.gcsclient.get_bucket(bucket_name)
+        blob = bucket.blob(blob_name)
         return json.loads(blob.download_as_text())
 
-    def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
-        return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
+    # def _get_image_asset_id(self, attribute: str, tag: str, task_date: str):
+    #     return f"{self.ee_osm_root}/{attribute}/{tag}/{tag}_{task_date}"
+
+    def _uri_to_asset_id(self,uri:str):
+        """Map source GCS URIs to new destination GEE asset id"""
+        uri_p = Path(uri)
+        asset = f"{uri_p.parent.stem}/{uri_p.stem}"
+        return f"{self.ee_cloud_asset_root}/{self.ee_osm_root}/{asset}"
 
     # Step 1
     def import_images_to_ee(self, metadata: dict) -> List[str]:
@@ -62,8 +80,8 @@ class HIIOSMIngest(HIITask):
 
         image_asset_ids = []
         for image_uri in image_uris:
-            image_asset_id = f"{PROJECTS}/{self.ee_project}/{ee_dir}/{Path(os.path.splitext(image_uri)[0]).name}"
-            task_id = self.storage2image(image_uri, image_asset_id, nodataval=0)
+            image_asset_id = self._uri_to_asset_id(image_uri)
+            # task_id = self.storage2image(image_uri, image_asset_id, nodataval=0)
             image_asset_ids.append(image_asset_id)
 
         self.wait()
@@ -106,9 +124,12 @@ class HIIOSMIngest(HIITask):
 
         img_col = ee.ImageCollection(bands.map(band_merge))
         img = img_col.toBands().rename(band_names)
+        img = img.set("osm_url",metadata.get("osm_url"))
         asset_path = f"{self.ee_osm_root}/{self.output_image}"
         self.export_image_ee(img, asset_path, image_collection=True)
-
+        
+        self.wait()
+        
         return asset_path
 
     # Step 4
@@ -117,7 +138,7 @@ class HIIOSMIngest(HIITask):
             return
 
         for asset in assets:
-            self.rm_ee(asset)
+            self._rm_ee(asset)
 
     def calc(self):
         _assets_to_clean = []
@@ -132,12 +153,11 @@ class HIIOSMIngest(HIITask):
             with Timer("Group image bands"):
                 self.group_bands(image_asset_ids, metadata)
 
-            # with Timer("Import roads table Storage to EE table"):
-            #     osm_roads_dir = f"{self.ee_osm_root}/roads"
-            #     roads_dir = f"{PROJECTS}/{self.ee_project}/{osm_roads_dir}"
-            #     self._prep_asset_id(osm_roads_dir)
-            #     roads_asset_id = f"{roads_dir}/roads_{self.taskdate}"
-            #     self.import_roads_to_ee(metadata["road"], roads_asset_id)
+            # if self.import_roads:
+            #     with Timer("Import roads table Storage to EE table"):
+            #         roads_asset_dir = f"{self.ee_osm_root}/roads"
+            #         _, roads_asset_id = self._prep_asset_id(roads_asset_dir)
+            #         self.import_roads_to_ee(metadata["road"], roads_asset_id)
 
         finally:
             with Timer("Clean up"):
@@ -165,6 +185,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip cleaning up temporary task files",
     )
+    parser.add_argument(
+        "--import_roads",
+        action="store_true",
+        help="import roads .csv from cloud storage to GEE"
+    )
+    
     parser.add_argument(
         "--output_image",
         type=str,
